@@ -1,5 +1,4 @@
 
-
 """
 app.py — AquaPredict Dashboard
 ====================================================================
@@ -71,22 +70,6 @@ UNIDADES = {
     "Trihalomethanes": "μg/L", "Turbidity": "NTU",
 }
 
-# ==============================================================
-# VALIDACIÓN NCh 409/1.Of2005
-# ==============================================================
-def validar_nch409(valores: dict) -> tuple[bool, list]:
-    """Verifica si los parámetros cumplen la NCh 409.
-    Retorna (cumple: bool, parametros_fuera: list).
-    La lógica es conservadora: si cualquier parámetro excede
-    el límite, el agua se clasifica como NO POTABLE,
-    independientemente de lo que diga el modelo ML."""
-    parametros_fuera = []
-    for feat, val in valores.items():
-        ok_min, ok_max = RANGOS_REF[feat]["ok"]
-        if not (ok_min <= val <= ok_max):
-            parametros_fuera.append(feat)
-    cumple = len(parametros_fuera) == 0
-    return cumple, parametros_fuera
 
 # ==============================================================
 # CARGA DE ARTEFACTOS (con fallback inteligente)
@@ -178,8 +161,29 @@ pipeline_listo = all(
     artefactos[k] is not None for k in ("scaler", "knn_imputer", "scaler_pre")
 )
 
+
 # ==============================================================
 # FUNCIÓN DE PREDICCIÓN
+# ==============================================================
+# VALIDACIÓN NCh 409/1.Of2005
+# ==============================================================
+def validar_nch409(valores: dict) -> tuple:
+    """Verifica si los parámetros cumplen la NCh 409.
+    Retorna (cumple: bool, parametros_fuera: list).
+    La lógica es conservadora: si cualquier parámetro excede
+    el límite, el agua se clasifica como NO POTABLE,
+    independientemente de lo que diga el modelo ML."""
+    parametros_fuera = []
+    for feat, val in valores.items():
+        ok_min, ok_max = RANGOS_REF[feat]["ok"]
+        if not (ok_min <= val <= ok_max):
+            parametros_fuera.append(feat)
+    cumple = len(parametros_fuera) == 0
+    return cumple, parametros_fuera
+
+
+# ==============================================================
+# FUNCIÓN DE PREDICCIÓN CON VALIDACIÓN REGULATORIA
 # ==============================================================
 def predecir_potabilidad(valores: dict):
     """Predice potabilidad usando el modelo + validación NCh 409.
@@ -327,7 +331,7 @@ elif pagina == "🔮 Predicción":
                     )
             
             enviado = st.form_submit_button("Predecir", type="primary")
-        
+
         if enviado:
             clase, prob_potable, anulado_nch = predecir_potabilidad(valores)
 
@@ -351,6 +355,17 @@ elif pagina == "🔮 Predicción":
                             "superan los límites de la Norma Chilena NCh 409/1.Of2005. "
                             "El sistema aplica criterio conservador: **NO POTABLE**."
                         )
+                    # Explicación cuando todos los parámetros pasan NCh 409 pero el modelo dice no potable
+                    elif clase == 0 and all(
+                        RANGOS_REF[feat]["ok"][0] <= valores[feat] <= RANGOS_REF[feat]["ok"][1]
+                        for feat in FEATURE_COLS
+                    ):
+                        st.info(
+                            "ℹ️ Los parámetros cumplen individualmente con la NCh 409/1.Of2005, "
+                            "pero el modelo detecta un **patrón en la combinación de variables** "
+                            "que se asocia más frecuentemente con agua no potable en los datos "
+                            "de entrenamiento. El sistema mantiene el criterio predictivo del modelo."
+                        )
 
                 with col2:
                     st.markdown("**Parámetros vs. NCh 409/1.Of2005:**")
@@ -368,7 +383,7 @@ elif pagina == "🔮 Predicción":
                     st.dataframe(pd.DataFrame(filas), hide_index=True, use_container_width=True)
             else:
                 st.error("Error al predecir. Intenta de nuevo.")
-        
+
 
 # ==============================================================
 # PÁGINA: DASHBOARD
@@ -492,5 +507,5 @@ elif pagina == "📈 EDA":
 
 
 st.sidebar.divider()
-st.sidebar.caption("IDS/IS 2026 · UCN · 2026")
+st.sidebar.caption("IDS 2026 · UCN · 2026")
 
