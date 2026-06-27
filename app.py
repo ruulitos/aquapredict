@@ -71,6 +71,22 @@ UNIDADES = {
     "Trihalomethanes": "μg/L", "Turbidity": "NTU",
 }
 
+# ==============================================================
+# VALIDACIÓN NCh 409/1.Of2005
+# ==============================================================
+def validar_nch409(valores: dict) -> tuple[bool, list]:
+    """Verifica si los parámetros cumplen la NCh 409.
+    Retorna (cumple: bool, parametros_fuera: list).
+    La lógica es conservadora: si cualquier parámetro excede
+    el límite, el agua se clasifica como NO POTABLE,
+    independientemente de lo que diga el modelo ML."""
+    parametros_fuera = []
+    for feat, val in valores.items():
+        ok_min, ok_max = RANGOS_REF[feat]["ok"]
+        if not (ok_min <= val <= ok_max):
+            parametros_fuera.append(feat)
+    cumple = len(parametros_fuera) == 0
+    return cumple, parametros_fuera
 
 # ==============================================================
 # CARGA DE ARTEFACTOS (con fallback inteligente)
@@ -162,24 +178,39 @@ pipeline_listo = all(
     artefactos[k] is not None for k in ("scaler", "knn_imputer", "scaler_pre")
 )
 
-
 # ==============================================================
 # FUNCIÓN DE PREDICCIÓN
 # ==============================================================
 def predecir_potabilidad(valores: dict):
-    """Predice potabilidad usando el modelo cargado."""
-    if not modelo_listo:
-        return None, None
+    """Predice potabilidad usando el modelo + validación NCh 409.
     
+    Lógica conservadora (igual a la descrita en el informe):
+    - Si NCh 409 falla → NO POTABLE (sin importar qué diga el modelo)
+    - Si NCh 409 pasa Y el modelo dice potable → POTABLE
+    - Si NCh 409 pasa Y el modelo dice no potable → NO POTABLE
+    
+    Retorna: (clase: int, prob_potable: float, anulado_por_nch: bool)
+    """
+    if not modelo_listo:
+        return None, None, False
+
+    cumple_nch, parametros_fuera = validar_nch409(valores)
+
     X = pd.DataFrame([valores], columns=FEATURE_COLS)
     X_scaled = artefactos["scaler"].transform(X)
-    
+
     try:
         pred = artefactos["modelo"].predict(X_scaled)[0]
         proba = artefactos["modelo"].predict_proba(X_scaled)[0]
-        return int(pred), float(proba[1])
+        prob_potable = float(proba[1])
+
+        # Override conservador NCh 409
+        if not cumple_nch and int(pred) == 1:
+            return 0, prob_potable, True   # modelo decía potable, NCh lo anula
+        
+        return int(pred), prob_potable, False
     except Exception:
-        return None, None
+        return None, None, False
 
 
 # ==============================================================
@@ -296,9 +327,9 @@ elif pagina == "🔮 Predicción":
                     )
             
             enviado = st.form_submit_button("Predecir", type="primary")
-
+        
         if enviado:
-            clase, prob_potable = predecir_potabilidad(valores)
+            clase, prob_potable, anulado_nch = predecir_potabilidad(valores)
 
             if clase is not None:
                 st.divider()
@@ -309,11 +340,20 @@ elif pagina == "🔮 Predicción":
                         st.success("✅ POTABLE")
                     else:
                         st.error("⛔ NO POTABLE")
-                    st.metric("Probabilidad potable", f"{prob_potable * 100:.1f}%")
+                    st.metric("Probabilidad potable (ML)", f"{prob_potable * 100:.1f}%")
                     st.progress(min(max(prob_potable, 0.0), 1.0))
 
+                    # Aviso si NCh 409 anuló la predicción del modelo
+                    if anulado_nch:
+                        st.warning(
+                            "⚠️ **Anulado por NCh 409:** El modelo ML estimó "
+                            "probabilidad de agua potable, pero uno o más parámetros "
+                            "superan los límites de la Norma Chilena NCh 409/1.Of2005. "
+                            "El sistema aplica criterio conservador: **NO POTABLE**."
+                        )
+
                 with col2:
-                    st.markdown("**Parámetros vs. rango deseable:**")
+                    st.markdown("**Parámetros vs. NCh 409/1.Of2005:**")
                     filas = []
                     for feat in FEATURE_COLS:
                         ok_min, ok_max = RANGOS_REF[feat]["ok"]
@@ -322,13 +362,13 @@ elif pagina == "🔮 Predicción":
                         filas.append({
                             "Parámetro": feat,
                             "Valor": round(val, 2),
-                            "Rango OK": f"{ok_min}–{ok_max}",
-                            "Estado": "✅" if dentro else "⚠️",
+                            "Límite NCh 409": f"{ok_min}–{ok_max}",
+                            "Estado": "✅" if dentro else "⚠️ Fuera de norma",
                         })
                     st.dataframe(pd.DataFrame(filas), hide_index=True, use_container_width=True)
             else:
                 st.error("Error al predecir. Intenta de nuevo.")
-
+        
 
 # ==============================================================
 # PÁGINA: DASHBOARD
